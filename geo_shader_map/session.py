@@ -182,9 +182,10 @@ def _get_abc_file_path(cmd_output_file):
             Log.info('Line in cmd_output_file: '.format(line))
             # pattern is different with _get_reference_file_path
             # one is ' [w/\\].*.abc";' and the other is '[w/\\].*.abc";'
-            matched = re.findall(r' [w/\\].*.abc";', line)
+            matched = re.findall(r' *.*abc";$', line)
             if matched:
-                geo_path = matched[0].strip().replace('";', '')
+                geo_path = matched[0].strip().rsplit(' ', 1)[1].replace('";',
+                                                                        '')
                 Log.info('Got geo path: {}'.format(geo_path))
                 break
 
@@ -212,9 +213,11 @@ def _get_reference_file_path(cmd_output_file):
         for line in f:
             line = line.strip().rstrip('\r\n')
             Log.info('Line in cmd_output_file: '.format(line))
-            matched = re.findall(r' "[w/\\].*.abc";', line)
+            matched = re.findall(r' *.*abc";$', line)
             if matched:
-                geo_path = matched[0].replace(' "', '').replace('";', '')
+                geo_path = matched[0].strip().rsplit(' ', 1)[1].replace('";',
+                                                                        '').replace(
+                    '"', '')
                 Log.info('Got geo path: {}'.format(geo_path))
                 continue
 
@@ -278,11 +281,7 @@ class SessionException(Exception):
 class Session(object):
     """
     Usage:
-        import sys
-        sys.path.append('~/lilisi')
-
-        from geo_shader_map import session
-        reload(session)
+        from lilisi.geo_shader_map import session
         session.Session.export_scene(export_selection=True)
         session.Session.import_scene()
     """
