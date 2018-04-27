@@ -3,6 +3,7 @@ import tempfile
 import sys
 from pprint import pformat
 import re
+import json
 
 from maya import cmds
 
@@ -14,11 +15,13 @@ import exporter
 
 reload(exporter)
 
-from importer import Geo_Importer, Shader_Importer, Shader_Map_Importer
-from exporter import Geo_Exporter, Shader_Exporter, Shader_Map_Exporter
+from importer import Geo_Importer, Shader_Importer
+from exporter import Geo_Exporter, Shader_Exporter
 
 # store exported geometry types
 _GEO_TYPES = ('mesh', 'camera', 'nurbsSurface', 'nurbsCurve')
+
+_SHADER_ATTR = 'assigned_shader'
 
 
 def _get_scene_type(scene_ext):
@@ -49,13 +52,28 @@ def _set_shader_path(base_path, scene_ext):
 
 
 def _get_shader_path(base_path):
+    file_paths = []
     # check which kind of maya file exists
-    for file_ext in ('ma', 'mb', 'Ma', 'Mb', 'mA', 'mB', 'MA', 'MB'):
+    for file_ext in ('ma', 'mb'):
         file_path = '{}.{}'.format(base_path, file_ext)
         if os.path.isfile(file_path):
-            return file_path
-    Log.warning('Failed to find shader path for "{}".'.format(base_path))
-    return ''
+            file_paths.append(file_path)
+
+    if len(file_paths) == 1:
+        return file_paths[0]
+
+    elif len(file_paths) > 1:
+        paths = '\n'.join(file_paths)
+        msg = "There are two files match with shader file naming, please " \
+              "remove the wrong one and then export again:\n{}".format(paths)
+        cmds.confirmDialog(title='Remove one shader file',
+                           message=msg,
+                           button=['Okay'], defaultButton='Okay')
+        raise SessionException(msg)
+
+    else:
+        Log.warning('Failed to find shader path for "{}".'.format(base_path))
+        return ''
 
 
 def _get_assigned_geometries(shading_engine):
@@ -104,15 +122,15 @@ def _get_shading_map(shading_engines, selected_geos):
                 if '.f[' in member:
                     mesh_name = member.split('.')
                     member = '{}.{}'.format(
-                        cmds.ls(mesh_name[0], l=True)[0], mesh_name[1])
+                        cmds.ls(mesh_name[0], long=True)[0], mesh_name[1])
                 else:
-                    member = cmds.ls(member, l=True)[0]
+                    member = cmds.ls(member, long=True)[0]
                 # Only add if geometry in selected_geos
                 if selected_geos:
                     # ['|pCube1.f[0]'] --> ['|pCube1|pCubeShape1']
                     member_shape = \
-                        cmds.ls(member.split('.')[0], type=_GEO_TYPES, dag=True,
-                                lf=True, l=True)[0]
+                        cmds.ls(member.split('.')[0], type='mesh', dag=True,
+                                lf=True, long=True)[0]
                     Log.info('member shape: {}'.format(member_shape))
                     if member_shape in selected_geos:
                         sets.append(member)
@@ -274,6 +292,91 @@ def _get_temp_file(suffix=''):
     return tempfile.NamedTemporaryFile(suffix=suffix, delete=False).name
 
 
+def _get_geos_shaders_map(geo_shapes, shaders_map):
+    """
+    Return example:
+        {u'|pCube1|pCubeShape1': {'': u'lambert2SG'},
+         u'|pCube2|pCubeShape2': {'.f[0:3]': u'lambert2SG',
+                              '.f[4]': u'blinn1SG',
+                              '.f[5]': u'lambert2SG'},
+    :param geo_shapes:
+    :param shaders_map:
+    :return: e.g.
+    """
+    geos_shaders_map = {}
+    for geo_shape in geo_shapes:
+        geos_shaders_map[geo_shape] = {}
+        for shader, assigned_shapes in shaders_map.iteritems():
+            if geo_shape in assigned_shapes:
+                geos_shaders_map[geo_shape][''] = shader
+                break
+            else:
+                for assigned_shape in assigned_shapes:
+                    if '.f[' in assigned_shape:
+                        tran_name = assigned_shape.split('.')
+                        mesh_name = \
+                            cmds.ls(tran_name[0], long=True, dag=True, lf=True,
+                                    type='mesh')[0]
+                        if geo_shape == mesh_name:
+                            key = '.f[{}'.format(
+                                assigned_shape.rsplit('.f[', 1)[1])
+                            geos_shaders_map[geo_shape][key] = shader
+    Log.info('Geo shader map: {}'.format(pformat(geos_shaders_map)))
+    return geos_shaders_map
+
+
+def _add_shader_attr(geo_shape, geos_shaders_map):
+    """
+    Add below attrs to geometry shape:
+        {".f[5]": "lambert2SG", ".f[4]": "blinn1SG", ".f[0:3]": "lambert2SG"}
+    :param geo_shape:
+    :param geos_shaders_map:
+    :return:
+    """
+    shader_attribute = '{0}.assigned_shader'.format(geo_shape)
+    assigned_shaders = geos_shaders_map.get(geo_shape)
+    assigned_shaders_str = json.dumps(assigned_shaders)
+
+    if _SHADER_ATTR not in cmds.listAttr(geo_shape):
+        cmds.addAttr(geo_shape, shortName=_SHADER_ATTR,
+                     longName=_SHADER_ATTR,
+                     dataType='string',
+                     storable=True, writable=True, readable=True)
+    else:
+        if cmds.getAttr(shader_attribute, lock=True):
+            cmds.setAttr(shader_attribute, lock=False)
+
+    if cmds.getAttr(shader_attribute) != assigned_shaders_str:
+        cmds.setAttr(shader_attribute, assigned_shaders_str, type='string')
+
+    cmds.setAttr(shader_attribute, lock=True)
+
+
+def _assign_shader_to_geometry(shader_namespace,
+                               geo_shapes):
+    """
+    :param shader_namespace: namespace of shading group reference
+    :return:
+    """
+    for geo_shape in geo_shapes:
+        shader_map_str = cmds.getAttr('{}.{}'.format(geo_shape, _SHADER_ATTR))
+        shader_map = json.loads(shader_map_str)
+        Log.info(
+            'Shaders for {}:\n{}'.format(geo_shape, pformat(shader_map)))
+        for part, shader in shader_map.iteritems():
+            shape = '{}{}'.format(geo_shape, part)
+
+            # # remove objects which don't exist in current scene
+            # geo_with_namespace = [x for x in geo_with_namespace if
+            #                       cmds.objExists(x)]
+            # Log.info('Geo_with_namespace exists in current scene: {}'.format(
+            #     geo_with_namespace))
+            # if geo_with_namespace:
+            sg = "{0}:{1}".format(shader_namespace, shader)
+            Log.info('Assigning {} to {}'.format(sg, shape))
+            cmds.sets(shape, e=True, forceElement=sg)
+
+
 class SessionException(Exception):
     pass
 
@@ -313,6 +416,14 @@ class Session(object):
 
         _load_plugin('AbcExport')
         cmd_output_file = _set_cmd_output_file()
+
+        shading_engines = _get_shading_engines(selected_geos=selected_geos)
+        shading_map = _get_shading_map(shading_engines, selected_geos)
+        geos_shaders_map = _get_geos_shaders_map(selected_geos, shading_map)
+        # Write "shader" attribute to geometries
+        for geo_shape in selected_geos:
+            _add_shader_attr(geo_shape, geos_shaders_map)
+
         Geo_Exporter.alembic_export(export_selection=export_selection)
         geo_path = _get_abc_file_path(cmd_output_file)
 
@@ -326,16 +437,11 @@ class Session(object):
 
         base_path = os.path.splitext(geo_path)[0]
         shader_path = _set_shader_path(base_path, scene_ext)
-        shader_map_path = _set_shader_map_path(base_path)
 
-        shading_engines = _get_shading_engines(selected_geos=selected_geos)
         if shading_engines:
-            shading_map = _get_shading_map(shading_engines, selected_geos)
             Shader_Exporter.export(path=shader_path,
                                    scene_type=scene_type,
                                    shading_engines=shading_engines)
-            Shader_Map_Exporter.export(path=shader_map_path,
-                                       shading_map=shading_map)
 
         # re select geos after export
         if sels:
@@ -349,15 +455,10 @@ class Session(object):
         cmd_output_file = _set_cmd_output_file()
         Geo_Importer.alembic_import()
         geo_path, geo_ref_path = _get_reference_file_path(cmd_output_file)
-        if geo_ref_path:
-            geo_namespace = cmds.referenceQuery(geo_ref_path, ns=True).replace(
-                ':', '')
-            Log.info('Geo namespace: {}'.format(geo_namespace))
 
         base_path = os.path.splitext(geo_path)[0]
         base_name = os.path.basename(base_path)
         shader_path = _get_shader_path(base_path)
-        shader_map_path = _get_shader_map_path(base_path)
 
         if shader_path:
             scene_ext = shader_path.rsplit('.')[1]
@@ -365,12 +466,17 @@ class Session(object):
             shader_namespace = Shader_Importer.import_shader(path=shader_path,
                                                              scene_type=scene_type,
                                                              namespace=base_name)
-            # Assign shader if shader_path is valid.
-            if shader_map_path:
-                Shader_Map_Importer.import_shader_map(path=shader_map_path,
-                                                      geo_namespace=geo_namespace,
-                                                      shader_namespace=shader_namespace)
 
-        # re select geos after export
+            if geo_ref_path:
+                geo_namespace = cmds.referenceQuery(geo_ref_path,
+                                                    ns=True)
+                Log.info('Geo namespace: {}'.format(geo_namespace))
+
+                ref_nodes = cmds.referenceQuery(geo_ref_path, nodes=True)
+                geo_shapes = cmds.ls(ref_nodes, dag=True, leaf=True, long=True,
+                                     type='mesh')
+                _assign_shader_to_geometry(shader_namespace, geo_shapes)
+
+        # re-select geos after export
         if sels:
             cmds.select(sels, r=True)
