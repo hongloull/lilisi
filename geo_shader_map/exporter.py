@@ -79,11 +79,3 @@ class Shader_Exporter(Exporter):
         cmds.select(shading_engines, ne=True, r=True)
         return cmds.file(path, exportSelected=True, force=True, sh=True,
                          pr=True, type=scene_type)
-
-
-class Shader_Map_Exporter(Exporter):
-
-    @classmethod
-    def export(cls, path='', shading_map=None):
-        with open(path, 'w') as f:
-            json.dump(shading_map, f)
