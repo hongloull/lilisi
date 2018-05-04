@@ -122,6 +122,9 @@ def _get_shading_map(shading_engines, selected_geos):
             if '.f[' in member:
                 # ['|pCube1.f[0]'] --> ['|pCube1|pCubeShape1.f[0]']
                 member_trans, face_sets = member.rsplit('.', 1)
+                if cmds.ls(member_trans, showType=True)[1] != 'transform':
+                    member_trans = cmds.listRelatives(p=True, type='transform')[
+                        0]
                 Log.info('Member_trans: {}'.format(member_trans))
                 member_trans_long_name = cmds.ls(member_trans, long=True)[0]
                 if member_trans_long_name in selected_transforms:
