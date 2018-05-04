@@ -65,11 +65,8 @@ class Geo_Exporter(Exporter):
         return start, end
 
     @classmethod
-    def alembic_export(cls, export_selection=True):
-        if export_selection:
-            return cmds.AlembicExportSelection()
-        else:
-            return cmds.AlembicExportAll()
+    def alembic_export(cls):
+        return cmds.AlembicExportSelection()
 
 
 class Shader_Exporter(Exporter):

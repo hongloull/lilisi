@@ -107,77 +107,70 @@ def _get_shading_map(shading_engines, selected_geos):
      {'lambert3SG': ['|pCube3.f[4]', '|pCube2|pCubeShape2'],
      'lambert2SG': ['|pCube1|pCubeShape1']}
     """
+    selected_transforms = cmds.listRelatives(selected_geos, parent=True,
+                                             fullPath=True)
+    # selected_transforms = cmds.ls(selected_transforms, long=True)
+    Log.info('Selected transforms: {}'.format(selected_transforms))
     shading_map = {}
     for shading_engine in shading_engines:
-        members = []
-        members_of_engine = cmds.sets(shading_engine, q=True)
-        if members_of_engine:
-            for i in members_of_engine:
-                # members.append(str(i))
-                members.append(i)
-            if not members:
-                continue
-            sets = []
-            for member in members:
-                if '.f[' in member:
-                    mesh_name = member.split('.')
-                    member = '{}.{}'.format(
-                        cmds.ls(mesh_name[0], long=True)[0], mesh_name[1])
-                else:
-                    member = cmds.ls(member, long=True)[0]
-                # Only add if geometry in selected_geos
-                if selected_geos:
-                    # ['|pCube1.f[0]'] --> ['|pCube1|pCubeShape1']
-                    member_shape = \
-                        cmds.ls(member.split('.')[0], type='mesh', dag=True,
-                                lf=True, long=True)[0]
-                    Log.info('member shape: {}'.format(member_shape))
-                    if member_shape in selected_geos:
-                        sets.append(member)
-                else:
-                    sets.append(member)
-            if not sets:
-                continue
+        members = cmds.sets(shading_engine, q=True)
+        if not members:
+            continue
+
+        sets = []
+        for member in members:
+            if '.f[' in member:
+                # ['|pCube1.f[0]'] --> ['|pCube1|pCubeShape1.f[0]']
+                member_trans, face_sets = member.rsplit('.', 1)
+                if cmds.ls(member_trans, showType=True)[1] != 'transform':
+                    member_trans = cmds.listRelatives(p=True, type='transform')[
+                        0]
+                Log.info('Member_trans: {}'.format(member_trans))
+                member_trans_long_name = cmds.ls(member_trans, long=True)[0]
+                if member_trans_long_name in selected_transforms:
+                    member_shapes = \
+                        cmds.ls(member_trans, type='mesh', dag=True,
+                                lf=True, long=True)
+                    Log.info('Member_shapes:{}'.format(member_shapes))
+                    matched = set(member_shapes).intersection(selected_geos)
+                    if matched:
+                        for item in matched:
+                            sets.append('{}.{}'.format(item, face_sets))
+
             else:
-                shading_map.update({shading_engine: sets})
+                member = cmds.ls(member, long=True)[0]
+                # Only add if geometry in selected_geos
+                member_shapes = \
+                    cmds.ls(member.split('.')[0], type='mesh', dag=True,
+                            lf=True, long=True)
+                if member_shapes:
+                    Log.info('Member_shapes:{}'.format(member_shapes))
+                    matched = set(member_shapes).intersection(selected_geos)
+                    if matched:
+                        sets.append(member)
+
+        if not sets:
+            continue
+        else:
+            shading_map.update({shading_engine: sets})
 
     Log.info('Shading map:\n{}'.format(pformat(shading_map)))
     return shading_map
 
 
 def _get_shading_engines(selected_geos=None):
-    if selected_geos:
-        msg = ' '.join(selected_geos)
-    else:
-        msg = 'the whole scene.'
-    Log.info('Getting shading engines for {}'.format(msg))
-    shading_engines = cmds.ls(dag=True, leaf=True, noIntermediate=True,
-                              type='shadingEngine')
+    shading_engines = cmds.listConnections(selected_geos,
+                                           source=False,
+                                           destination=True,
+                                           type='shadingEngine')
     default_shading_engines = {'initialShadingGroup', 'initialParticleSE'}
-    shading_engines = set(shading_engines).difference(
-        default_shading_engines)
-
-    filtered_shading_engines = []
-    if shading_engines:
-        for shading_engine in shading_engines:
-            obj_type = cmds.ls(shading_engine, showType=True)
-            if obj_type and obj_type[1] == 'shadingEngine':
-                if not selected_geos:
-                    filtered_shading_engines.append(shading_engine)
-                else:
-                    if _get_assigned_geometries(shading_engine).intersection(
-                            selected_geos):
-                        filtered_shading_engines.append(shading_engine)
-                    else:
-                        Log.info(
-                            'Members of shading engine "{}" are not in selected'
-                            ' geometries.'.format(shading_engine))
+    shading_engines = list(
+        set(shading_engines).difference(default_shading_engines))
     Log.info(
-        'Filtered shading engines: {}'.format(filtered_shading_engines))
-    if not filtered_shading_engines:
-        Log.warning('Filtered shading engine is empty.')
-
-    return filtered_shading_engines
+        'Shading engines: {}'.format(shading_engines))
+    if not shading_engines:
+        Log.warning('Shading engine is empty.')
+    return shading_engines
 
 
 def _get_abc_file_path(cmd_output_file):
@@ -365,13 +358,6 @@ def _assign_shader_to_geometry(shader_namespace,
             'Shaders for {}:\n{}'.format(geo_shape, pformat(shader_map)))
         for part, shader in shader_map.iteritems():
             shape = '{}{}'.format(geo_shape, part)
-
-            # # remove objects which don't exist in current scene
-            # geo_with_namespace = [x for x in geo_with_namespace if
-            #                       cmds.objExists(x)]
-            # Log.info('Geo_with_namespace exists in current scene: {}'.format(
-            #     geo_with_namespace))
-            # if geo_with_namespace:
             sg = "{0}:{1}".format(shader_namespace, shader)
             Log.info('Assigning {} to {}'.format(sg, shape))
             cmds.sets(shape, e=True, forceElement=sg)
@@ -384,26 +370,24 @@ class SessionException(Exception):
 class Session(object):
     """
     Usage:
-        from lilisi.geo_shader_map import session
+        from geo_shader_map import session
         session.Session.export_scene(export_selection=True)
         session.Session.import_scene()
     """
 
     @staticmethod
-    def export_scene(export_selection=False):
+    def export_scene(export_selection=True):
         sels = cmds.ls(sl=True)
 
-        selected_geos = []
-        if export_selection:
-            selected_geos = cmds.ls(sl=True, dag=True, leaf=True, l=True,
-                                    type=_GEO_TYPES)
-            Log.info('Selected geometries: {}'.format(selected_geos))
-            if not selected_geos:
-                cmds.confirmDialog(title='Select geometry to export',
-                                   message="Please select some geometries "
-                                           "before exporting",
-                                   button=['Okay'], defaultButton='Okay')
-                return
+        selected_geos = cmds.ls(sl=True, dag=True, leaf=True, l=True,
+                                noIntermediate=True, type=_GEO_TYPES)
+        Log.info('Selected geometries: {}'.format(selected_geos))
+        if not selected_geos:
+            cmds.confirmDialog(title='Select geometry to export',
+                               message="Please select some geometries "
+                                       "before exporting",
+                               button=['Okay'], defaultButton='Okay')
+            return
 
         scene_name = _get_scene_name()
         if not scene_name:
@@ -424,7 +408,7 @@ class Session(object):
         for geo_shape in selected_geos:
             _add_shader_attr(geo_shape, geos_shaders_map)
 
-        Geo_Exporter.alembic_export(export_selection=export_selection)
+        Geo_Exporter.alembic_export()
         geo_path = _get_abc_file_path(cmd_output_file)
 
         if not geo_path:
@@ -458,7 +442,14 @@ class Session(object):
 
         base_path = os.path.splitext(geo_path)[0]
         base_name = os.path.basename(base_path)
-        shader_path = _get_shader_path(base_path)
+        try:
+            shader_path = _get_shader_path(base_path)
+        except SessionException:
+            # remove geo reference
+            cmds.file(geo_ref_path, removeReference=True)
+            if sels:
+                cmds.select(sels, r=True)
+            return
 
         if shader_path:
             scene_ext = shader_path.rsplit('.')[1]
